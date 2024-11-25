@@ -1,0 +1,17 @@
+{
+  "canisters": {
+    "earthstream_sensor_presale_backend": {
+      "candid": "src/earthstream_sensor_presale_backend/earthstream_sensor_presale_backend.did",
+      "package": "earthstream_sensor_presale_backend",
+      "type": "rust"
+    }
+  },
+  "defaults": {
+    "build": {
+      "args": "",
+      "packtool": ""
+    }
+  },
+  "output_env_file": ".env",
+  "version": 1
+}

@@ -1,0 +1,5 @@
+[workspace]
+members = [
+    "src/earthstream_sensor_presale_backend"
+]
+resolver = "2"
