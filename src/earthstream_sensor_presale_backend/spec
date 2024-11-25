@@ -1,0 +1,82 @@
+I need an ICP canister that has the following data structures:
+
+Sensor: {
+    sensor_id: string,
+    sensor_type: enum: {GSM, LORA, GATEWAY_GSM, GATEWAY_WIFI},
+    owner: principal,
+    assign_type: enum: {OWNER default, PROJECT},
+    project_id: string,
+    purchase_date
+    transaction: {
+        chainID: BigUint64Array,
+        txhash: string,
+        token_type: enum: {NATIVE, ERC20},
+        contract_address: string,
+        amount: number,
+        from_address: string,
+    },
+    status: enum {
+        PRESALE,
+        PROCESSING_FOR_SHIPPING,
+        SHIPPED,
+        DEPLOYED,
+        OFFLINE,
+        QUERY (something strange - eg. purchase price etc.)
+    }
+}
+
+I need a function to purchase a sensor, the function should update the sensor object with the transaction details. I'll add the logic to check the token transfer later.
+The function parameters need to be the sensor_id, transaction hash, the caller principal, purchase amount (in wei), token type, contract address, and from address.
+(I will do the transaction on the front end and use chain fusion to confirm the transaction - I already have code for that so don't worry here)
+Tokens are only created on purchase. Transaction details need to never be changed.
+
+I need to be able to list sensors by:
+owner principal
+project
+sensor type (and purchase date range)
+
+and then get a count per sensor type
+
+
+I also need the follpowing data type:
+User {
+    principal
+    address (evm address),
+    discord_handle
+}
+
+I need to be able to look up user by principal, address or discord_handle
+
+I also need a function to create a super admin - this os an anonymous function if there is no super admin, otherwise only a super admin can change it
+And then a function to add and remove admins - done by super admin
+
+the following functions are managed by admins:
+edit sensor_status
+edit assign_type and project_id
+
+Please feel free to ask questions for clarity before coding
+
+
+I also need a list of tokens accepted:
+[{
+    token_id (for reference)
+    chain_id,
+    rpc_url,
+    token_type enum {NATIVE, ERC20},
+    contract address
+}..]
+
+Only admins can add to, remove or edit this
+
+And then a list of sensor prices:
+[{
+    sensor_type: [
+        {token_id, amount}
+    ]
+}...]
+
+Only admins can add to, remove or edit this
+
+I need to be able to get the full list of tokens accepted
+I need to be able to look up prices by token_id(s)
+Anyone has access to this
