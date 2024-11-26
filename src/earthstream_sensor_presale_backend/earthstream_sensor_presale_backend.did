@@ -1,3 +1,62 @@
+type SensorType = variant { Gsm; Lora; GatewayGsm; GatewayWifi };
+type AssignType = variant { OWNER; PROJECT };
+type SensorStatus = variant { Presale; ProcessingForshipping; Shipped; Deployed; Offline; Query };
+type TokenType = variant { Native; Erc20 };
+
+type Sensor = record {
+  sensor_id: text;
+  public_key: text;
+  sensor_type: SensorType;
+  owner: principal;
+  assign_type: AssignType;
+  project_id: opt text;
+  purchase_date: opt nat64;
+  txhash: text;
+  status: SensorStatus;
+};
+
+type User = record {
+  user_principal: principal;
+  address: text;
+  discord_handle: text;
+};
+
+type AcceptedToken = record {
+  token_id: text;
+  chain_id: text;
+  rpc_url: text;
+  token_type: TokenType;
+  contract_address: opt text;
+  symbol: text;
+  decimals: nat8;
+  sensor_base_price: nat64;
+};
+
+type Result_void_text = variant { ok: null; err: text };
+type Result_vec_text_text = variant { ok: vec text; err: text };
+type Result_nat64_text = variant { ok: nat64; err: text };
+type Result_AcceptedToken_text = variant { ok: AcceptedToken; err: text };
+type Result_User_text = variant { ok: User; err: text };
+
 service : {
-    test_native_transaction : (text) -> (text, nat) query;
+  list_accepted_tokens: (opt text, opt TokenType) -> (vec AcceptedToken) query;
+  set_price_ratio: (SensorType, nat64) -> (Result_void_text);
+  add_accepted_token: (AcceptedToken) -> (Result_void_text);
+  remove_accepted_token: (text) -> (Result_void_text);
+  get_price: (SensorType, text, nat64) -> (Result_nat64_text) query;
+  get_token: (text) -> (Result_AcceptedToken_text) query;
+  purchase_sensor: (SensorType, text, text, nat64, text, nat64) -> (Result_vec_text_text);
+  count_sensors: () -> (nat) query;
+  list_sensors_by_owner: (principal) -> (vec Sensor) query;
+  list_sensors_by_project: (text) -> (vec Sensor) query;
+  list_sensors_by_type_and_date: (SensorType, nat64, nat64) -> (vec Sensor) query;
+  edit_sensor_status: (text, SensorStatus) -> (Result_void_text);
+  set_sensor_project_id: (text, text) -> (Result_void_text);
+  remove_sensor_project_id: (text) -> (Result_void_text);
+  create_super_admin: () -> (Result_void_text);
+  add_admin: (principal) -> (Result_void_text);
+  remove_admin: (principal) -> (Result_void_text);
+  add_user: (text, text) -> (Result_void_text);
+  edit_user: ( principal, opt text, opt text) -> (Result_void_text);
+  get_user: (principal) -> (Result_User_text) query;
 }

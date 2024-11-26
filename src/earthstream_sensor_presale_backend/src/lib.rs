@@ -11,6 +11,7 @@ use candid::Principal;
 use std::collections::HashMap;
 use std::cell::RefCell;
 use sha2::{Sha256, Digest};
+use ic_cdk_macros::*;
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct Transaction {
@@ -309,12 +310,8 @@ impl CanisterState {
             .collect()
     }
     
-    pub fn count_sensors_by_type(&self) -> HashMap<SensorType, usize> {
-        let mut counts = HashMap::new();
-        for sensor in self.sensors.values() {
-            *counts.entry(sensor.sensor_type.clone()).or_insert(0) += 1;
-        }
-        counts
+    pub fn count_sensors(&self) -> usize {
+        self.sensors.len()
     }
 
     // Sensor functions
@@ -643,14 +640,22 @@ async fn validate_native(rpc_url: String, tx_hash: String, from: String, to: Str
 }
 
 //public functions:
-pub fn list_accepted_tokens(
-    chain_id: Option<&str>,
-    token_type: Option<TokenType>,
+#[query]
+fn list_accepted_tokens(
+    chain_id: Option<String>,       
+    token_type: Option<TokenType>, 
 ) -> Vec<AcceptedToken> {
-   with_state(|state| state.list_accepted_tokens(chain_id, token_type.as_ref()))
+    with_state(|state| {
+        state.list_accepted_tokens(
+            chain_id.as_deref(), 
+            token_type.as_ref(),
+        )
+    })
 }
 
-pub fn set_price_ratio(
+
+#[update]
+async fn set_price_ratio(
     caller: Principal,
     sensor_type: SensorType,
     price_ratio: u64
@@ -658,24 +663,29 @@ pub fn set_price_ratio(
     with_state(|state| state.set_price_ratio(caller, sensor_type, price_ratio))
 }
 
-pub fn add_accepted_token(
+#[update]
+async fn add_accepted_token(
     caller: Principal,
     token: AcceptedToken,
 ) -> Result<(), String> {
     with_state(|state| state.add_accepted_token(caller, token))
 }
 
-pub fn remove_accepted_token(caller: Principal, token_id: &str) -> Result<(), String> {
-    with_state(|state| state.remove_accepted_token(caller, token_id))
+#[update]
+async fn remove_accepted_token(caller: Principal, token_id: String) -> Result<(), String> {
+    with_state(|state| state.remove_accepted_token(caller, &token_id))
 }
 
-pub fn get_price(
-    sensor_type: &SensorType,
-    token_id: &str,
+
+
+#[query]
+fn get_price(
+    sensor_type: SensorType, // Owned type
+    token_id: String,        // Owned type
     amount: u64,
 ) -> Result<u64, String> {
     with_state(|state| {
-        let token = state.get_accepted_token(token_id, None);
+        let token = state.get_accepted_token(&token_id, None);
         if let Some(token) = token {
             let price_ratio = state.price_ratios.get(&sensor_type).ok_or("Price ratio not set.")?;
             Ok(amount * price_ratio / token.decimals as u64)
@@ -685,14 +695,17 @@ pub fn get_price(
     })
 }
 
-pub fn get_token(token_id: String) -> Result<AcceptedToken, String> {
+
+#[query]
+fn get_token(token_id: String) -> Result<AcceptedToken, String> {
     with_state(|state| {
         let t = state.get_accepted_token(token_id.as_str(), None);
         t.cloned().ok_or("Token not found.".to_string())
     })
 }
 
-pub async fn purchase_sensor(
+#[update]
+async fn purchase_sensor(
     caller: Principal,
     sensor_type: SensorType,
     token_id: String,
@@ -708,7 +721,7 @@ pub async fn purchase_sensor(
     let chain_id = token.chain_id.clone();
 
     // Calculate the required price
-    let total_price = get_price(&sensor_type, token_id.as_str(), amount)
+    let total_price = get_price(sensor_type.clone(), token_id, amount)
         .map_err(|err| format!("Invalid price: {}", err))? * sensor_count;
 
     // Validate transaction based on token type
@@ -728,15 +741,23 @@ pub async fn purchase_sensor(
     })
 }
 
-pub fn list_sensors_by_owner(owner: Principal) -> Vec<Sensor> {
+#[query]
+fn count_sensors() -> usize {
+    with_state(|state| state.count_sensors())
+}
+
+#[query]
+fn list_sensors_by_owner(owner: Principal) -> Vec<Sensor> {
     with_state(|state| state.list_sensors_by_owner(owner))
 }
 
-pub fn list_sensors_by_project(project_id: String) -> Vec<Sensor> {
+#[query]
+fn list_sensors_by_project(project_id: String) -> Vec<Sensor> {
     with_state(|state| state.list_sensors_by_project(project_id))
 }
 
-pub fn list_sensors_by_type_and_date(
+#[query]
+fn list_sensors_by_type_and_date(
     sensor_type: SensorType,
     start_date: u64,
     end_date: u64,
@@ -744,62 +765,71 @@ pub fn list_sensors_by_type_and_date(
     with_state(|state| state.list_sensors_by_type_and_date(sensor_type, start_date, end_date))
 }
 
-pub fn count_sensors_by_type() -> HashMap<SensorType, usize> {
-    with_state(|state| state.count_sensors_by_type())
-}
-
-pub fn edit_sensor_status(
-    caller: Principal,
-    sensor_id: &str,
+#[update]
+async fn edit_sensor_status(
+    sensor_id: String,
     new_status: SensorStatus,
 ) -> Result<(), String> {
-    with_state(|state| state.edit_sensor_status(caller, sensor_id, new_status))
+    let caller = ic_cdk::api::caller();
+    with_state(|state| state.edit_sensor_status(caller, &sensor_id, new_status))
 }
 
-pub fn set_sensor_project_id(
-    caller: Principal,
-    sensor_id: &str,
+#[update]
+async fn set_sensor_project_id(
+    sensor_id: String,
     project_id: String,
 ) -> Result<(), String> {
-    with_state(|state| state.set_sensor_project_id(caller, sensor_id, project_id))
+    let caller = ic_cdk::api::caller();
+    with_state(|state| state.set_sensor_project_id(caller, &sensor_id, project_id))
 }
 
-pub fn remove_sensor_project_id(caller: Principal, sensor_id: &str) -> Result<(), String> {
-    with_state(|state| state.remove_sensor_project_id(caller, sensor_id))
+#[update]
+fn remove_sensor_project_id(sensor_id: String) -> Result<(), String> {
+    let caller = ic_cdk::api::caller();
+    with_state(|state| state.remove_sensor_project_id(caller, &sensor_id))
 }
 
-pub fn create_super_admin(caller: Principal) -> Result<(), String> {
+#[update]
+async fn create_super_admin() -> Result<(), String> {
+    let caller = ic_cdk::api::caller();
     with_state(|state| state.create_super_admin(caller))
 }
 
-pub fn add_admin(caller: Principal, new_admin: Principal) -> Result<(), String> {
+#[update]
+async fn add_admin(new_admin: Principal) -> Result<(), String> {
+    let caller = ic_cdk::api::caller();
     with_state(|state| state.add_admin(caller, new_admin))
 }
 
-pub fn remove_admin(caller: Principal, admin: Principal) -> Result<(), String> {
+#[update]
+async fn remove_admin(admin: Principal) -> Result<(), String> {
+    let caller = ic_cdk::api::caller();
     with_state(|state| state.remove_admin(caller, admin))
 }
 
-pub fn add_user(
-    caller: Principal,
+#[update]
+async fn add_user(
     address: String,
     discord_handle: String,
 ) -> Result<(), String> {
+    let caller = ic_cdk::api::caller();
     with_state(|state| state.add_user(caller, address, discord_handle))
 }
 
-pub fn edit_user(
-    caller: Principal,
+#[update]
+async fn edit_user(
     user_principal: Principal,
     new_address: Option<String>,
     new_discord_handle: Option<String>,
 ) -> Result<(), String> {
+    let caller = ic_cdk::api::caller();
     with_state(|state| {
         state.edit_user(caller, user_principal, new_address, new_discord_handle)
     })
 }
 
-pub fn get_user(principal: Principal) -> Result<User, String> {
+#[query]
+fn get_user(principal: Principal) -> Result<User, String> {
     with_state(|state| state.get_user(principal).cloned())
 }
 
