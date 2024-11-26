@@ -88,7 +88,7 @@ pub struct AcceptedToken {
 
 // Canister state
 #[derive(Default)]
-pub struct CanisterState {
+struct CanisterState {
     pub sensors: HashMap<String, Sensor>,
     pub users: HashMap<Principal, User>,
     pub transactions: HashMap<String, Transaction>, // Store transactions by txhash
@@ -144,13 +144,72 @@ impl CanisterState {
         }
     }
 
-    pub fn get_transaction(&self, txhash: &str) -> Option<&Transaction> {
+    
+    pub fn add_user(
+        &mut self,
+        caller: Principal,
+        address: String,
+        discord_handle: String,
+    ) -> Result<(), String> {
+        // Check if the user already exists
+        if self.users.contains_key(&caller) {
+            return Err("User already exists.".to_string());
+        }
+
+        // Add the new user
+        let user = User {
+            principal: caller,
+            address,
+            discord_handle,
+        };
+        self.users.insert(caller, user);
+        Ok(())
+    }
+
+    pub fn edit_user(
+        &mut self,
+        caller: Principal,
+        user_principal: Principal,
+        new_address: Option<String>,
+        new_discord_handle: Option<String>,
+    ) -> Result<(), String> {
+        // Check if the user exists
+        if let Some(user) = self.users.get_mut(&user_principal) {
+            // Check if the caller is the user or an admin
+            if caller != user_principal
+                && !self.admins.contains(&caller)
+                && self.super_admin != Some(caller)
+            {
+                return Err("Permission denied.".to_string());
+            }
+
+            // Update the user's information
+            if let Some(address) = new_address {
+                user.address = address;
+            }
+            if let Some(discord_handle) = new_discord_handle {
+                user.discord_handle = discord_handle;
+            }
+
+            Ok(())
+        } else {
+            Err("User not found.".to_string())
+        }
+    }
+    
+    pub fn get_user(&self, principal: Principal) -> Result<&User, String> {
+        self.users.get(&principal).ok_or_else(|| "User not found.".to_string())
+    }
+
+    /*
+    pub fn get_transaction(&self, txhash: &str) -> Option<Transaction> {
         self.transactions.get(txhash)
     }
 
-    pub fn list_transactions(&self) -> Vec<&Transaction> {
+    pub fn list_transactions(&self) -> Vec<Transaction> {
         self.transactions.values().collect()
     }
+    */
 
     pub fn purchase_sensor(
         &mut self,
@@ -640,38 +699,112 @@ pub async fn purchase_sensor(
     txhash: String,
     amount: u64,
     from_address: String,
+    sensor_count: u64,
 ) -> Result<Vec<String>, String> {
-
     let token = get_token(token_id.clone()).map_err(|_| "No token found".to_string())?;
     let rpc_url = token.rpc_url.clone();
     let token_type = token.token_type.clone();
-    let contract_address = token.contract_address.clone();
-    let contract_address = contract_address.unwrap_or("none".to_string());
+    let contract_address = token.contract_address.clone().unwrap_or("none".to_string());
     let chain_id = token.chain_id.clone();
 
-    let price = get_price(&sensor_type, token_id.as_str(), amount.clone()).map_err(|_| "invalid price".to_string())?;
+    // Calculate the required price
+    let total_price = get_price(&sensor_type, token_id.as_str(), amount)
+        .map_err(|err| format!("Invalid price: {}", err))? * sensor_count;
 
-    if token_type == TokenType::Erc20 {
-        match validate_erc20(rpc_url, txhash.clone(), from_address.clone(), contract_address.clone(), price).await {
-            Ok(_) => {
-                with_state(|state| {
-                    state.purchase_sensor(sensor_type, chain_id, txhash, caller, amount, token_type, contract_address, from_address, amount)
-                })
-            },
-            Err(err) => Err(format!("Error validating ERC20 transaction: {}", err)),
-        }
+    // Validate transaction based on token type
+    let validation_result = if token_type == TokenType::Erc20 {
+        validate_erc20(rpc_url, txhash.clone(), from_address.clone(), contract_address.clone(), total_price).await
     } else {
-        match validate_native(rpc_url, txhash.clone(), from_address.clone(), contract_address.clone(), price).await {
-            Ok(_) => {
-                with_state(|state| {
-                    state.purchase_sensor(sensor_type, chain_id, txhash, caller, amount, token_type, contract_address, from_address, amount)
-                })
-            },
-            Err(err) => Err(format!("Error validating native transaction: {}", err)),
-        }
-    }
+        validate_native(rpc_url, txhash.clone(), from_address.clone(), contract_address.clone(), total_price).await
+    };
 
+    validation_result.map_err(|err| format!("Transaction validation failed: {}", err))?;
+
+    // Record transaction and add sensors
+    with_state(|state| {
+        state.purchase_sensor(
+            sensor_type, chain_id, txhash, caller, amount, token_type, contract_address, from_address, sensor_count,
+        )
+    })
 }
+
+pub fn list_sensors_by_owner(owner: Principal) -> Vec<Sensor> {
+    with_state(|state| state.list_sensors_by_owner(owner))
+}
+
+pub fn list_sensors_by_project(project_id: String) -> Vec<Sensor> {
+    with_state(|state| state.list_sensors_by_project(project_id))
+}
+
+pub fn list_sensors_by_type_and_date(
+    sensor_type: SensorType,
+    start_date: u64,
+    end_date: u64,
+) -> Vec<Sensor> {
+    with_state(|state| state.list_sensors_by_type_and_date(sensor_type, start_date, end_date))
+}
+
+pub fn count_sensors_by_type() -> HashMap<SensorType, usize> {
+    with_state(|state| state.count_sensors_by_type())
+}
+
+pub fn edit_sensor_status(
+    caller: Principal,
+    sensor_id: &str,
+    new_status: SensorStatus,
+) -> Result<(), String> {
+    with_state(|state| state.edit_sensor_status(caller, sensor_id, new_status))
+}
+
+pub fn set_sensor_project_id(
+    caller: Principal,
+    sensor_id: &str,
+    project_id: String,
+) -> Result<(), String> {
+    with_state(|state| state.set_sensor_project_id(caller, sensor_id, project_id))
+}
+
+pub fn remove_sensor_project_id(caller: Principal, sensor_id: &str) -> Result<(), String> {
+    with_state(|state| state.remove_sensor_project_id(caller, sensor_id))
+}
+
+pub fn create_super_admin(caller: Principal) -> Result<(), String> {
+    with_state(|state| state.create_super_admin(caller))
+}
+
+pub fn add_admin(caller: Principal, new_admin: Principal) -> Result<(), String> {
+    with_state(|state| state.add_admin(caller, new_admin))
+}
+
+pub fn remove_admin(caller: Principal, admin: Principal) -> Result<(), String> {
+    with_state(|state| state.remove_admin(caller, admin))
+}
+
+pub fn add_user(
+    caller: Principal,
+    address: String,
+    discord_handle: String,
+) -> Result<(), String> {
+    with_state(|state| state.add_user(caller, address, discord_handle))
+}
+
+pub fn edit_user(
+    caller: Principal,
+    user_principal: Principal,
+    new_address: Option<String>,
+    new_discord_handle: Option<String>,
+) -> Result<(), String> {
+    with_state(|state| {
+        state.edit_user(caller, user_principal, new_address, new_discord_handle)
+    })
+}
+
+pub fn get_user(principal: Principal) -> Result<User, String> {
+    with_state(|state| state.get_user(principal).cloned())
+}
+
+
+
     
 
 
