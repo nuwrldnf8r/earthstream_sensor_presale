@@ -7,12 +7,14 @@ use ic_cdk::{self, api::call::CallResult};
 use candid::{CandidType};
 use serde::{Deserialize, Serialize};
 use std::string::String;
-use ic_cdk::export::Principal;
+use candid::Principal;
 use std::collections::HashMap;
+use std::cell::RefCell;
+use sha2::{Sha256, Digest};
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct Transaction {
-    pub chain_id: Vec<u8>, // BigUint64Array equivalent
+    pub chain_id: String, // BigUint64Array equivalent
     pub txhash: String,
     pub token_type: TokenType,
     pub contract_address: String,
@@ -23,43 +25,39 @@ pub struct Transaction {
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct Sensor {
     pub sensor_id: String,
+    pub public_key: String,
     pub sensor_type: SensorType,
     pub owner: Principal,
     pub assign_type: AssignType,
     pub project_id: Option<String>,
     pub purchase_date: Option<u64>, // Timestamp in seconds
-    pub transaction: Option<Transaction>,
+    pub txhash: String, // Reference to transaction
     pub status: SensorStatus,
 }
 
-#[derive(Clone, Debug, CandidType, Deserialize)]
+
+#[derive(Clone, Debug, CandidType, Deserialize,PartialEq, Eq, Hash)]
 pub enum SensorType {
-    GSM,
-    LORA,
-    GATEWAY_GSM,
-    GATEWAY_WIFI,
+    Gsm,
+    Lora,
+    GatewayGsm,
+    GatewayWifi,
 }
 
-#[derive(Clone, Debug, CandidType, Deserialize)]
+#[derive(Clone, Debug, CandidType, Deserialize,PartialEq, Eq, Hash)]
 pub enum AssignType {
     OWNER,
     PROJECT,
 }
 
-#[derive(Clone, Debug, CandidType, Deserialize)]
+#[derive(Clone, Debug, CandidType, Deserialize,PartialEq, Eq, Hash)]
 pub enum SensorStatus {
-    PRESALE,
-    PROCESSING_FOR_SHIPPING,
-    SHIPPED,
-    DEPLOYED,
-    OFFLINE,
-    QUERY,
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub enum TokenType {
-    NATIVE,
-    ERC20,
+    Presale,
+    ProcessingForshipping,
+    Shipped,
+    Deployed,
+    Offline,
+    Query,
 }
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
@@ -69,83 +67,155 @@ pub struct User {
     pub discord_handle: String,
 }
 
+#[derive(Clone, Debug, CandidType, Deserialize,PartialEq, Eq, Hash)]
+pub enum TokenType {
+    Native,
+    Erc20,
+}
+
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct AcceptedToken {
     pub token_id: String,
-    pub chain_id: Vec<u8>, // BigUint64Array equivalent
+    pub chain_id: String, // BigUint64Array equivalent
     pub rpc_url: String,
     pub token_type: TokenType,
     pub contract_address: Option<String>, // Optional for NATIVE tokens
+    pub symbol: String,
+    pub decimals: u8,
+    pub sensor_base_price: u64, // Price in wei
 }
 
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct SensorPrice {
-    pub sensor_type: SensorType,
-    pub prices: Vec<TokenPrice>,
-}
-
-#[derive(Clone, Debug, CandidType, Deserialize)]
-pub struct TokenPrice {
-    pub token_id: String,
-    pub amount: u64, // Amount in wei
-}
 
 // Canister state
 #[derive(Default)]
 pub struct CanisterState {
     pub sensors: HashMap<String, Sensor>,
     pub users: HashMap<Principal, User>,
-    pub accepted_tokens: Vec<AcceptedToken>,
-    pub sensor_prices: Vec<SensorPrice>,
+    pub transactions: HashMap<String, Transaction>, // Store transactions by txhash
+    pub accepted_tokens: Vec<AcceptedToken>, // Store accepted tokens centrally
+    pub price_ratios: HashMap<SensorType, u64>,
     pub admins: Vec<Principal>,
     pub super_admin: Option<Principal>,
 }
 
+
+// Canister logic skeleton
 impl CanisterState {
     pub fn new() -> Self {
         Self {
             sensors: HashMap::new(),
             users: HashMap::new(),
+            transactions: HashMap::new(),
             accepted_tokens: Vec::new(),
-            sensor_prices: Vec::new(),
+            price_ratios: HashMap::new(),
             admins: Vec::new(),
             super_admin: None,
         }
     }
-}
+    // Admin functions
+    pub fn create_super_admin(&mut self, caller: Principal) -> Result<(), String> {
+        if self.super_admin.is_none() {
+            self.super_admin = Some(caller);
+            Ok(())
+        } else if self.super_admin == Some(caller) {
+            Err("Super admin already exists.".to_string())
+        } else {
+            Err("Permission denied.".to_string())
+        }
+    }
 
-// Canister logic skeleton
-impl CanisterState {
+    pub fn add_admin(&mut self, caller: Principal, new_admin: Principal) -> Result<(), String> {
+        if self.super_admin == Some(caller) {
+            if !self.admins.contains(&new_admin) {
+                self.admins.push(new_admin);
+            }
+            Ok(())
+        } else {
+            Err("Permission denied.".to_string())
+        }
+    }
+
+    pub fn remove_admin(&mut self, caller: Principal, admin: Principal) -> Result<(), String> {
+        if self.super_admin == Some(caller) {
+            self.admins.retain(|&x| x != admin);
+            Ok(())
+        } else {
+            Err("Permission denied.".to_string())
+        }
+    }
+
+    pub fn get_transaction(&self, txhash: &str) -> Option<&Transaction> {
+        self.transactions.get(txhash)
+    }
+
+    pub fn list_transactions(&self) -> Vec<&Transaction> {
+        self.transactions.values().collect()
+    }
+
     pub fn purchase_sensor(
         &mut self,
-        sensor_id: String,
+        sensor_type: SensorType,
+        chain_id: String,
         txhash: String,
         caller: Principal,
         amount: u64,
         token_type: TokenType,
         contract_address: String,
         from_address: String,
-    ) -> Result<(), String> {
-        if let Some(sensor) = self.sensors.get_mut(&sensor_id) {
-            if sensor.transaction.is_some() {
-                return Err("Transaction details cannot be updated.".to_string());
-            }
-            sensor.transaction = Some(Transaction {
-                chain_id: vec![],
-                txhash,
-                token_type,
-                contract_address,
-                amount,
-                from_address,
-            });
-            sensor.owner = caller;
-            sensor.purchase_date = Some(ic_cdk::api::time() / 1_000_000); // Convert from nanoseconds to seconds
-            Ok(())
-        } else {
-            Err("Sensor ID not found.".to_string())
+        sensor_number: u64,
+    ) -> Result<Vec<String>, String> {
+        // Check if the transaction already exists
+        if self.transactions.contains_key(&txhash) {
+            return Err("Transaction already exists.".to_string());
         }
+    
+        // Add the transaction
+        let transaction = Transaction {
+            chain_id,
+            txhash: txhash.clone(),
+            token_type,
+            contract_address: contract_address.clone(),
+            amount,
+            from_address: from_address.clone(),
+        };
+        self.transactions.insert(txhash.clone(), transaction);
+    
+        // Create sensors
+        let mut sensor_ids = Vec::new();
+        for i in 0..sensor_number {
+            let mut hasher = Sha256::new();
+            hasher.update(&txhash);
+            hasher.update(&caller.as_slice());
+            hasher.update(&amount.to_le_bytes());
+            hasher.update(&contract_address);
+            hasher.update(&from_address);
+            hasher.update(&i.to_le_bytes());
+            let sensor_id = hex::encode(hasher.finalize()); // Generate unique sensor ID
+    
+            // Check if the sensor ID already exists
+            if self.sensors.contains_key(&sensor_id) {
+                return Err(format!("Sensor ID {} already exists.", sensor_id));
+            }
+    
+            // Add the sensor
+            let new_sensor = Sensor {
+                sensor_id: sensor_id.clone(),
+                public_key: String::new(), // Will be provisioned later
+                sensor_type: sensor_type.clone(),
+                owner: caller.clone(),
+                assign_type: AssignType::OWNER,
+                project_id: None,
+                purchase_date: Some(ic_cdk::api::time() / 1_000_000), // Convert from nanoseconds to seconds
+                txhash: txhash.clone(), // Link to transaction
+                status: SensorStatus::Presale,
+            };
+            self.sensors.insert(sensor_id.clone(), new_sensor);
+            sensor_ids.push(sensor_id);
+        }
+    
+        Ok(sensor_ids)
     }
-
+    
     pub fn list_sensors_by_owner(&self, owner: Principal) -> Vec<Sensor> {
         self.sensors
             .values()
@@ -187,6 +257,139 @@ impl CanisterState {
         }
         counts
     }
+
+    // Sensor functions
+    pub fn edit_sensor_status(
+        &mut self,
+        caller: Principal,
+        sensor_id: &str,
+        new_status: SensorStatus,
+    ) -> Result<(), String> {
+        if self.admins.contains(&caller) || self.super_admin == Some(caller) {
+            if let Some(sensor) = self.sensors.get_mut(sensor_id) {
+                sensor.status = new_status;
+                Ok(())
+            } else {
+                Err("Sensor not found.".to_string())
+            }
+        } else {
+            Err("Permission denied.".to_string())
+        }
+    }
+
+    pub fn set_sensor_project_id(
+        &mut self,
+        caller: Principal,
+        sensor_id: &str,
+        project_id: String,
+    ) -> Result<(), String> {
+        if let Some(sensor) = self.sensors.get_mut(sensor_id) {
+            if sensor.owner == caller {
+                if sensor.project_id.is_none() {
+                    sensor.project_id = Some(project_id);
+                    Ok(())
+                } else {
+                    Err("Project ID is already set.".to_string())
+                }
+            } else {
+                Err("Permission denied.".to_string())
+            }
+        } else {
+            Err("Sensor not found.".to_string())
+        }
+    }
+
+    pub fn remove_sensor_project_id(&mut self, caller: Principal, sensor_id: &str) -> Result<(), String> {
+        if self.admins.contains(&caller) || self.super_admin == Some(caller) {
+            if let Some(sensor) = self.sensors.get_mut(sensor_id) {
+                sensor.project_id = None;
+                Ok(())
+            } else {
+                Err("Sensor not found.".to_string())
+            }
+        } else {
+            Err("Permission denied.".to_string())
+        }
+    }
+
+    pub fn add_accepted_token(
+        &mut self,
+        caller: Principal,
+        token: AcceptedToken,
+    ) -> Result<(), String> {
+        if self.admins.contains(&caller) || self.super_admin == Some(caller) {
+            // Ensure the token doesn't already exist
+            if self.accepted_tokens.iter().any(|t| t.token_id == token.token_id) {
+                return Err("Token already exists.".to_string());
+            }
+            self.accepted_tokens.push(token);
+            Ok(())
+        } else {
+            Err("Permission denied.".to_string())
+        }
+    }
+
+    pub fn remove_accepted_token(&mut self, caller: Principal, token_id: &str) -> Result<(), String> {
+        if self.admins.contains(&caller) || self.super_admin == Some(caller) {
+            let original_len = self.accepted_tokens.len();
+            self.accepted_tokens.retain(|token| token.token_id != token_id);
+            if self.accepted_tokens.len() < original_len {
+                Ok(())
+            } else {
+                Err("Token not found.".to_string())
+            }
+        } else {
+            Err("Permission denied.".to_string())
+        }
+    }
+    
+    pub fn get_accepted_token(
+        &self,
+        chain_id: &str,
+        contract_address: Option<&str>,
+    ) -> Option<&AcceptedToken> {
+        self.accepted_tokens.iter().find(|token| {
+            token.chain_id == chain_id
+                && (contract_address.is_none()
+                    || token.contract_address.as_deref() == contract_address)
+        })
+    }
+    
+    pub fn list_accepted_tokens(
+        &self,
+        chain_id: Option<&str>,
+        token_type: Option<&TokenType>,
+    ) -> Vec<AcceptedToken> {
+        self.accepted_tokens
+            .iter()
+            .filter(|token| {
+                (chain_id.is_none() || token.chain_id == chain_id.unwrap())
+                    && (token_type.is_none() || token.token_type == *token_type.unwrap())
+            })
+            .cloned() // Clone each `AcceptedToken` to return owned values
+            .collect()
+    }
+    
+       
+
+    pub fn set_price_ratio(
+        &mut self,
+        caller: Principal,
+        sensor_type: SensorType,
+        price_ratio: u64
+    ) -> Result<(), String> {
+        if self.admins.contains(&caller) || self.super_admin == Some(caller) {
+            if let Some(ratio) = self.price_ratios.get_mut(&sensor_type) {
+                *ratio = price_ratio;
+            } else {
+                self.price_ratios.insert(sensor_type, price_ratio);
+            }
+            Ok(())
+        } else {
+            Err("Permission denied.".to_string())
+        } 
+    }
+   
 }
     
 
@@ -287,14 +490,12 @@ fn with_state<R>(f: impl FnOnce(&mut CanisterState) -> R) -> R {
 //TODO: state functions to come
 
 
-
-
-
+//chain fusion stuff
 fn parse_transaction_response(response: &str) -> Result<TransactionResult, serde_json::Error> {
     serde_json::from_str::<TransactionResult>(response)
 }
 
-fn decode_erc20_transfer(input: &str) -> Option<(String, u128)> {
+fn decode_erc20_transfer(input: &str) -> Option<(String, u64)> {
     if input.len() < 138 || &input[0..10] != "0xa9059cbb" {
         return None; // Not an ERC20 transfer
     }
@@ -303,64 +504,180 @@ fn decode_erc20_transfer(input: &str) -> Option<(String, u128)> {
     let recipient = format!("0x{}", &input[34..74]);
     let amount = u128::from_str_radix(&input[74..138], 16).ok()?; // Convert hex to u128
 
-    Some((recipient, amount))
+    Some((recipient, amount as u64))
 }
 
-fn handle_transaction_response(raw_response: &str) -> Result<String, String> {
-    // Parse the JSON response
-    let transaction_result: TransactionResult = parse_transaction_response(raw_response)
-        .map_err(|e| format!("Failed to parse JSON response: {}", e))?;
-
-    let details = transaction_result.result;
-
-    // Log the parsed transaction details
-    println!("Parsed Transaction Details: {:?}", details);
-
-    // Decode the ERC20 transfer (if applicable)
-    if let Some((recipient, amount)) = decode_erc20_transfer(&details.input) {
-        Ok(format!(
-            "ERC20 Transfer:\nRecipient: {}\nAmount: {}",
-            recipient, amount
-        ))
-    } else {
-        Ok("Not an ERC20 transfer".to_string())
-    }
-}
-
-
-/* 
-
-fn parse_erc20_transfer(input: &str) -> Option<(String, u128)> {
-    // Ensure input starts with the expected function selector for `transfer`
-    if input.len() < 138 || &input[0..10] != "0xa9059cbb" {
-        return None;
-    }
-
-    // Extract recipient address and amount
-    let recipient = format!("0x{}", &input[34..74]); // 32 bytes after the selector
-    let amount = u128::from_str_radix(&input[74..138], 16).ok()?; // Last 32 bytes
-
-    Some((recipient, amount))
-}
-    */
-
-#[ic_cdk::update]
-async fn get_transaction_details(tx_hash: String) -> String {
+async fn validate_erc20(rpc_url: String, tx_hash: String, from: String, to: String, amount: u64) -> Result<String, String> {
     let rpc_api = RpcApi {
-        url: "https://api.avax.network/ext/bc/C/rpc".to_string(),
+        url: rpc_url,
         headers: None,
     };
 
     match EvmRpcCanister::eth_get_transaction_by_hash(rpc_api, tx_hash, 25_000_000_000).await {
         Ok(response) => {
-            match handle_transaction_response(&response) {
-                Ok(result) => {
-                    result                    
-                },
-                Err(err) => format!("Error handling transaction response: {}", err),
+            let transaction_result: TransactionResult = parse_transaction_response(&response)
+                    .map_err(|e| format!("Failed to parse JSON response: {}", e))?;
+
+            let details = transaction_result.result;
+            let from_ = details.from.clone();
+            // Decode the ERC20 transfer (if applicable)
+            if let Some((recipient, amount_)) = decode_erc20_transfer(&details.input) {
+                if recipient != to{
+                    return Err(format!("Invalid Recipient: {}", recipient));
+                }
+                if from != from_ {
+                    return Err(format!("Invalid Sender: {}", from));
+                }
+                if amount != amount_ {
+                    return Err(format!("Invalid Amount: {}", amount));
+                }
+                return Ok(format!(
+                    "ERC20 Transfer:\nRecipient: {}, From: {}, Amount: {}",
+                    recipient, from, amount
+                ));
+
+            } else {
+                Err("Not an ERC20 transfer".to_string())
             }
         },
-        Err((code, err)) => format!("Error fetching transaction: {:?}, {}", code, err),
+        Err((code, err)) => Err(format!("Error fetching transaction: {:?}, {}", code, err)),
     }
 }
+
+async fn validate_native(rpc_url: String, tx_hash: String, from: String, to: String, amount: u64) -> Result<String, String> {
+    let rpc_api = RpcApi {
+        url: rpc_url,
+        headers: None,
+    };
+
+    match EvmRpcCanister::eth_get_transaction_by_hash(rpc_api, tx_hash, 25_000_000_000).await {
+        Ok(response) => {
+            let transaction_result: TransactionResult = parse_transaction_response(&response)
+                    .map_err(|e| format!("Failed to parse JSON response: {}", e))?;
+
+            let details = transaction_result.result;
+            let from_ = details.from.clone();
+            let value = details.value.clone();
+            let to_ = details.to.clone();
+
+            let value = u64::from_str_radix(value.trim_start_matches("0x"), 16)
+                .map_err(|e| format!("Invalid value: {}", e))?;
+            
+            if to != to_{
+                return Err(format!("Invalid Recipient: {}", to_));
+            }
+            if from != from_ {
+                return Err(format!("Invalid Sender: {}", from));
+            }
+            if amount != value {
+                return Err(format!("Invalid Amount: {}", amount));
+            }
+            return Ok(format!(
+                "Native Send:\nRecipient: {}, From: {}, Amount: {}",
+                to_, from, amount
+            ));
+
+            
+        },
+        Err((code, err)) => Err(format!("Error fetching transaction: {:?}, {}", code, err)),
+    }
+}
+
+//public functions:
+pub fn list_accepted_tokens(
+    chain_id: Option<&str>,
+    token_type: Option<TokenType>,
+) -> Vec<AcceptedToken> {
+   with_state(|state| state.list_accepted_tokens(chain_id, token_type.as_ref()))
+}
+
+pub fn set_price_ratio(
+    caller: Principal,
+    sensor_type: SensorType,
+    price_ratio: u64
+) -> Result<(), String> {
+    with_state(|state| state.set_price_ratio(caller, sensor_type, price_ratio))
+}
+
+pub fn add_accepted_token(
+    caller: Principal,
+    token: AcceptedToken,
+) -> Result<(), String> {
+    with_state(|state| state.add_accepted_token(caller, token))
+}
+
+pub fn remove_accepted_token(caller: Principal, token_id: &str) -> Result<(), String> {
+    with_state(|state| state.remove_accepted_token(caller, token_id))
+}
+
+pub fn get_price(
+    sensor_type: &SensorType,
+    token_id: &str,
+    amount: u64,
+) -> Result<u64, String> {
+    with_state(|state| {
+        let token = state.get_accepted_token(token_id, None);
+        if let Some(token) = token {
+            let price_ratio = state.price_ratios.get(&sensor_type).ok_or("Price ratio not set.")?;
+            Ok(amount * price_ratio / token.decimals as u64)
+        } else {
+            Err("Token not found.".to_string())
+        }
+    })
+}
+
+pub fn get_token(token_id: String) -> Result<AcceptedToken, String> {
+    with_state(|state| {
+        let t = state.get_accepted_token(token_id.as_str(), None);
+        t.cloned().ok_or("Token not found.".to_string())
+    })
+}
+
+pub async fn purchase_sensor(
+    caller: Principal,
+    sensor_type: SensorType,
+    token_id: String,
+    txhash: String,
+    amount: u64,
+    from_address: String,
+) -> Result<Vec<String>, String> {
+
+    let token = get_token(token_id.clone()).map_err(|_| "No token found".to_string())?;
+    let rpc_url = token.rpc_url.clone();
+    let token_type = token.token_type.clone();
+    let contract_address = token.contract_address.clone();
+    let contract_address = contract_address.unwrap_or("none".to_string());
+    let chain_id = token.chain_id.clone();
+
+    let price = get_price(&sensor_type, token_id.as_str(), amount.clone()).map_err(|_| "invalid price".to_string())?;
+
+    if token_type == TokenType::Erc20 {
+        match validate_erc20(rpc_url, txhash.clone(), from_address.clone(), contract_address.clone(), price).await {
+            Ok(_) => {
+                with_state(|state| {
+                    state.purchase_sensor(sensor_type, chain_id, txhash, caller, amount, token_type, contract_address, from_address, amount)
+                })
+            },
+            Err(err) => Err(format!("Error validating ERC20 transaction: {}", err)),
+        }
+    } else {
+        match validate_native(rpc_url, txhash.clone(), from_address.clone(), contract_address.clone(), price).await {
+            Ok(_) => {
+                with_state(|state| {
+                    state.purchase_sensor(sensor_type, chain_id, txhash, caller, amount, token_type, contract_address, from_address, amount)
+                })
+            },
+            Err(err) => Err(format!("Error validating native transaction: {}", err)),
+        }
+    }
+
+}
+    
+
+
+
+
+
+
+
 
