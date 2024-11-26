@@ -63,7 +63,7 @@ pub enum SensorStatus {
 
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct User {
-    pub principal: Principal,
+    pub user_principal: Principal,
     pub address: String, // EVM address
     pub discord_handle: String,
 }
@@ -84,6 +84,7 @@ pub struct AcceptedToken {
     pub symbol: String,
     pub decimals: u8,
     pub sensor_base_price: u64, // Price in wei
+    pub receive_address: String, // EVM address
 }
 
 
@@ -159,7 +160,7 @@ impl CanisterState {
 
         // Add the new user
         let user = User {
-            principal: caller,
+            user_principal: caller,
             address,
             discord_handle,
         };
@@ -401,13 +402,10 @@ impl CanisterState {
     
     pub fn get_accepted_token(
         &self,
-        chain_id: &str,
-        contract_address: Option<&str>,
+        token_id: &str,
     ) -> Option<&AcceptedToken> {
         self.accepted_tokens.iter().find(|token| {
-            token.chain_id == chain_id
-                && (contract_address.is_none()
-                    || token.contract_address.as_deref() == contract_address)
+            token.token_id == token_id
         })
     }
     
@@ -551,7 +549,7 @@ fn parse_transaction_response(response: &str) -> Result<TransactionResult, serde
     serde_json::from_str::<TransactionResult>(response)
 }
 
-fn decode_erc20_transfer(input: &str) -> Option<(String, u64)> {
+fn decode_erc20_transfer(input: &str) -> Option<(String, u128)> {
     if input.len() < 138 || &input[0..10] != "0xa9059cbb" {
         return None; // Not an ERC20 transfer
     }
@@ -560,10 +558,10 @@ fn decode_erc20_transfer(input: &str) -> Option<(String, u64)> {
     let recipient = format!("0x{}", &input[34..74]);
     let amount = u128::from_str_radix(&input[74..138], 16).ok()?; // Convert hex to u128
 
-    Some((recipient, amount as u64))
+    Some((recipient, amount))
 }
 
-async fn validate_erc20(rpc_url: String, tx_hash: String, from: String, to: String, amount: u64) -> Result<String, String> {
+async fn validate_erc20(rpc_url: String, tx_hash: String, from: String, to: String, amount: u128) -> Result<String, String> {
     let rpc_api = RpcApi {
         url: rpc_url,
         headers: None,
@@ -578,10 +576,10 @@ async fn validate_erc20(rpc_url: String, tx_hash: String, from: String, to: Stri
             let from_ = details.from.clone();
             // Decode the ERC20 transfer (if applicable)
             if let Some((recipient, amount_)) = decode_erc20_transfer(&details.input) {
-                if recipient != to{
+                if recipient.to_lowercase() != to.to_lowercase(){
                     return Err(format!("Invalid Recipient: {}", recipient));
                 }
-                if from != from_ {
+                if from.to_lowercase() != from_.to_lowercase() {
                     return Err(format!("Invalid Sender: {}", from));
                 }
                 if amount != amount_ {
@@ -600,7 +598,7 @@ async fn validate_erc20(rpc_url: String, tx_hash: String, from: String, to: Stri
     }
 }
 
-async fn validate_native(rpc_url: String, tx_hash: String, from: String, to: String, amount: u64) -> Result<String, String> {
+async fn validate_native(rpc_url: String, tx_hash: String, from: String, to: String, amount: u128) -> Result<String, String> {
     let rpc_api = RpcApi {
         url: rpc_url,
         headers: None,
@@ -616,13 +614,13 @@ async fn validate_native(rpc_url: String, tx_hash: String, from: String, to: Str
             let value = details.value.clone();
             let to_ = details.to.clone();
 
-            let value = u64::from_str_radix(value.trim_start_matches("0x"), 16)
+            let value = u128::from_str_radix(value.trim_start_matches("0x"), 16)
                 .map_err(|e| format!("Invalid value: {}", e))?;
             
-            if to != to_{
+            if to.to_lowercase() != to_.to_lowercase(){
                 return Err(format!("Invalid Recipient: {}", to_));
             }
-            if from != from_ {
+            if from.to_lowercase() != from_.to_lowercase() {
                 return Err(format!("Invalid Sender: {}", from));
             }
             if amount != value {
@@ -656,18 +654,18 @@ fn list_accepted_tokens(
 
 #[update]
 async fn set_price_ratio(
-    caller: Principal,
     sensor_type: SensorType,
     price_ratio: u64
 ) -> Result<(), String> {
+    let caller = ic_cdk::api::caller();
     with_state(|state| state.set_price_ratio(caller, sensor_type, price_ratio))
 }
 
 #[update]
 async fn add_accepted_token(
-    caller: Principal,
     token: AcceptedToken,
 ) -> Result<(), String> {
+    let caller = ic_cdk::api::caller();
     with_state(|state| state.add_accepted_token(caller, token))
 }
 
@@ -677,58 +675,90 @@ async fn remove_accepted_token(caller: Principal, token_id: String) -> Result<()
 }
 
 
-
-#[query]
 fn get_price(
     sensor_type: SensorType, // Owned type
     token_id: String,        // Owned type
     amount: u64,
-) -> Result<u64, String> {
+) -> Result<u128, String> {
     with_state(|state| {
-        let token = state.get_accepted_token(&token_id, None);
-        if let Some(token) = token {
-            let price_ratio = state.price_ratios.get(&sensor_type).ok_or("Price ratio not set.")?;
-            Ok(amount * price_ratio / token.decimals as u64)
+        if let Some(token) = state.get_accepted_token(&token_id) {
+            let price_ratio = state
+                .price_ratios
+                .get(&sensor_type)
+                .ok_or("Price ratio not set.")?;
+
+            // Use u128 for intermediate calculations to avoid overflow
+            let amount = amount as u128;
+            let sensor_base_price = token.sensor_base_price as u128;
+            let price_ratio = price_ratio.clone();
+            let price_ratio = price_ratio as u128;
+            let decimals = power(10, token.decimals) as u128;
+
+            let total_price = amount * (sensor_base_price * price_ratio)/100 * decimals/10; //should be /100 but for some reason the amount is *10 more than it should be
+
+            // Convert back to u64 if it fits
+            total_price.try_into().map_err(|_| "Price exceeds u64 capacity".to_string())
         } else {
             Err("Token not found.".to_string())
         }
     })
 }
 
+#[query]
+fn get_formatted_price(
+    sensor_type: SensorType,
+    token_id: String,
+    amount: u64,
+) -> Result<String, String> {
+    get_price(sensor_type, token_id, amount)
+        .map(|price| {
+            format!("{} wei", price)
+        })
+}
+
+// Adjusted power function
+fn power(base: u64, exponent: u8) -> u64 {
+    base.checked_pow(exponent.into())
+        .unwrap_or_else(|| panic!("Exponentiation overflow for base: {} and exponent: {}", base, exponent))
+}
+
 
 #[query]
 fn get_token(token_id: String) -> Result<AcceptedToken, String> {
     with_state(|state| {
-        let t = state.get_accepted_token(token_id.as_str(), None);
+        let t = state.get_accepted_token(token_id.as_str());
         t.cloned().ok_or("Token not found.".to_string())
     })
 }
 
 #[update]
 async fn purchase_sensor(
-    caller: Principal,
     sensor_type: SensorType,
     token_id: String,
     txhash: String,
-    amount: u64,
     from_address: String,
     sensor_count: u64,
 ) -> Result<Vec<String>, String> {
+    let caller = ic_cdk::api::caller();
     let token = get_token(token_id.clone()).map_err(|_| "No token found".to_string())?;
     let rpc_url = token.rpc_url.clone();
     let token_type = token.token_type.clone();
     let contract_address = token.contract_address.clone().unwrap_or("none".to_string());
+    let receive_address = token.receive_address.clone();
     let chain_id = token.chain_id.clone();
+    let amount = token.sensor_base_price.clone();
 
     // Calculate the required price
+    let num_sensors: u128 = sensor_count.into();
     let total_price = get_price(sensor_type.clone(), token_id, amount)
-        .map_err(|err| format!("Invalid price: {}", err))? * sensor_count;
+        .map_err(|err| format!("Invalid price: {}", err))? * num_sensors;
 
     // Validate transaction based on token type
     let validation_result = if token_type == TokenType::Erc20 {
-        validate_erc20(rpc_url, txhash.clone(), from_address.clone(), contract_address.clone(), total_price).await
+        //TODO: need to validate on contract address as well
+        validate_erc20(rpc_url, txhash.clone(), from_address.clone(), receive_address, total_price).await
     } else {
-        validate_native(rpc_url, txhash.clone(), from_address.clone(), contract_address.clone(), total_price).await
+        validate_native(rpc_url, txhash.clone(), from_address.clone(), receive_address, total_price).await
     };
 
     validation_result.map_err(|err| format!("Transaction validation failed: {}", err))?;
@@ -764,6 +794,7 @@ fn list_sensors_by_type_and_date(
 ) -> Vec<Sensor> {
     with_state(|state| state.list_sensors_by_type_and_date(sensor_type, start_date, end_date))
 }
+
 
 #[update]
 async fn edit_sensor_status(

@@ -30,6 +30,7 @@ type AcceptedToken = record {
   symbol: text;
   decimals: nat8;
   sensor_base_price: nat64;
+  receive_address: text;
 };
 
 service : {
@@ -37,9 +38,9 @@ service : {
   set_price_ratio: (SensorType, nat64) -> (variant { Ok; Err: text });
   add_accepted_token: (AcceptedToken) -> (variant { Ok; Err: text });
   remove_accepted_token: (text) -> (variant { Ok; Err: text });
-  get_price: (SensorType, text, nat64) -> (variant { Ok: nat64; Err: text }) query;
+  get_formatted_price: (SensorType, text, nat64) -> (variant { Ok: text; Err: text }) query;
   get_token: (text) -> (variant { Ok: AcceptedToken; Err: text }) query;
-  purchase_sensor: (SensorType, text, text, nat64, text, nat64) -> (variant { Ok: vec text; Err: text });
+  purchase_sensor: (SensorType, text, text, text, nat64) -> (variant { Ok: vec text; Err: text });
   count_sensors: () -> (nat) query;
   list_sensors_by_owner: (principal) -> (vec Sensor) query;
   list_sensors_by_project: (text) -> (vec Sensor) query;
